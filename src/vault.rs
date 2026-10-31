@@ -37,12 +37,11 @@ struct Item {
     login: Option<ItemLogin>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 struct ItemLogin {
     username: Option<String>,
     password: Option<String>,
     totp: Option<String>,
-    #[serde(default)]
     uris: Option<Vec<ItemUri>>,
 }
 
@@ -55,19 +54,14 @@ const LOGIN_TYPE: u8 = 1;
 
 impl Item {
     fn into_login(self) -> Login {
-        let login = self.login;
-        let uris = login
-            .as_ref()
-            .and_then(|l| l.uris.as_ref())
-            .map(|u| u.iter().filter_map(|u| u.uri.clone()).collect())
-            .unwrap_or_default();
+        let login = self.login.unwrap_or_default();
         Login {
             id: self.id,
             name: self.name,
-            username: login.as_ref().and_then(|l| l.username.clone()),
-            password: login.as_ref().and_then(|l| l.password.clone()),
-            has_totp: login.as_ref().is_some_and(|l| l.totp.is_some()),
-            uris,
+            username: login.username,
+            password: login.password,
+            has_totp: login.totp.is_some(),
+            uris: login.uris.unwrap_or_default().into_iter().filter_map(|u| u.uri).collect(),
         }
     }
 }
@@ -171,4 +165,34 @@ pub fn get(item: &str) -> Result<Login> {
 
 pub fn totp(id: &str) -> Result<String> {
     Ok(bw(&["get", "totp", id])?.trim().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn login(json: &str) -> Login {
+        serde_json::from_str::<Item>(json).unwrap().into_login()
+    }
+
+    #[test]
+    fn item_to_login() {
+        let l = login(
+            r#"{"id":"a","name":"GitHub","type":1,"login":{"username":"u","password":"p","totp":"otpauth://x",
+                "uris":[{"uri":"https://github.com"},{"uri":null},{"match":null}]}}"#,
+        );
+        assert_eq!((l.id.as_str(), l.name.as_str()), ("a", "GitHub"));
+        assert_eq!((l.username.as_deref(), l.password.as_deref()), (Some("u"), Some("p")));
+        assert!(l.has_totp);
+        assert_eq!(l.uris, ["https://github.com"]);
+
+        let l = login(r#"{"id":"b","name":"n","type":1,"login":{"username":null,"password":null,"totp":null,"uris":null}}"#);
+        assert_eq!((l.username, l.password, l.has_totp, l.uris.len()), (None, None, false, 0));
+
+        let l = login(r#"{"id":"c","name":"n","type":1,"login":{}}"#);
+        assert_eq!((l.username, l.has_totp, l.uris.len()), (None, false, 0));
+
+        let l = login(r#"{"id":"d","name":"n","type":2,"login":null}"#);
+        assert_eq!((l.password, l.has_totp, l.uris.len()), (None, false, 0));
+    }
 }

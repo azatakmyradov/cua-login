@@ -29,11 +29,7 @@ pub struct AxPage<'a> {
 
 impl<'a> AxPage<'a> {
     pub fn new(driver: &'a mut Driver, pid: i64, window_id: i64) -> Result<Self> {
-        let windows = driver.call("list_windows", json!({ "pid": pid }))?;
-        let window = windows["windows"]
-            .as_array()
-            .and_then(|w| w.iter().find(|w| w["window_id"] == window_id))
-            .context("no such window for that pid")?;
+        let window = driver.window(pid, window_id)?;
         let app = window["app_name"].as_str().unwrap_or_default();
         let app = *BROWSERS
             .iter()

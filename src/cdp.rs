@@ -3,6 +3,7 @@
 //! them, so cua-login's own session cannot bind them; their DevTools port is
 //! in the profile folder instead.
 
+use crate::driver::Driver;
 use crate::fill::{Input, Page};
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
@@ -31,6 +32,15 @@ pub fn driver_owned_port(pid: i64) -> Option<u16> {
     }
     let port = std::fs::read_to_string(format!("{dir}/DevToolsActivePort")).ok()?;
     port.lines().next()?.trim().parse().ok()
+}
+
+pub fn connect_driver_owned(driver: &mut Driver, pid: i64, window_id: i64) -> Result<Option<CdpPage>> {
+    let Some(port) = driver_owned_port(pid) else {
+        return Ok(None);
+    };
+    let window = driver.window(pid, window_id)?;
+    let title = window["title"].as_str().context("no such window for that pid")?;
+    CdpPage::connect(port, title).map(Some)
 }
 
 impl CdpPage {

@@ -2,9 +2,10 @@
 //! Results never contain usernames, passwords or codes.
 
 use crate::ax::AxPage;
-use crate::cdp::{self, CdpPage};
+use crate::browser::{self, Bound};
+use crate::cdp;
 use crate::driver::Driver;
-use crate::fill::{self, Field};
+use crate::fill::{self, Field, Page};
 use crate::vault;
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
@@ -111,7 +112,7 @@ fn call(name: &str, args: &Value) -> Result<Value> {
     }
 }
 
-pub fn fill_login(item: &str, pid: i64, window_id: i64, fields: &[Field]) -> Result<Value> {
+fn fill_login(item: &str, pid: i64, window_id: i64, fields: &[Field]) -> Result<Value> {
     let login = vault::get(item)?;
     let mut driver = Driver::start()?;
     fill::check_not_recording(&mut driver)?;
@@ -120,38 +121,22 @@ pub fn fill_login(item: &str, pid: i64, window_id: i64, fields: &[Field]) -> Res
         Field::Password => login.password.clone().context("the item has no password"),
         Field::Totp => vault::totp(&login.id),
     };
-    let filled = match fill::bind(&mut driver, pid, window_id)? {
-        Ok(tab) => fill::fill(&mut fill::DriverPage::new(&mut driver, tab), &login, fields, &mut secret)?,
-        Err(code) => match open_isolated(&mut driver, pid, window_id)? {
-            Some(mut page) => fill::fill(&mut page, &login, fields, &mut secret)?,
+    let mut page: Box<dyn Page + '_> = match browser::bind(&mut driver, pid, window_id)? {
+        Bound::Tab(tab) => Box::new(browser::DriverPage::new(&mut driver, tab)),
+        Bound::Refused(code) => match cdp::connect_driver_owned(&mut driver, pid, window_id)? {
+            Some(page) => Box::new(page),
             // Not attached and not ours: go through the accessibility tree.
-            None => {
-                let mut page = AxPage::new(&mut driver, pid, window_id)
-                    .with_context(|| format!("cua-driver refused this window ({code})"))?;
-                fill::fill(&mut page, &login, fields, &mut secret)?
-            }
+            None => Box::new(
+                AxPage::new(&mut driver, pid, window_id)
+                    .with_context(|| format!("cua-driver refused this window ({code})"))?,
+            ),
         },
     };
+    let filled = fill::fill(page.as_mut(), &login, fields, &mut secret)?;
     Ok(json!({
         "ok": true,
         "item": login.name,
         "site": filled.host,
         "filled": filled.fields.iter().map(|f| f.name()).collect::<Vec<_>>(),
     }))
-}
-
-/// A cua-driver isolated Chrome launched by another session, reached
-/// directly, or None if the window isn't one.
-pub fn open_isolated(driver: &mut Driver, pid: i64, window_id: i64) -> Result<Option<CdpPage>> {
-    let Some(port) = cdp::driver_owned_port(pid) else {
-        return Ok(None);
-    };
-    let windows = driver.call("list_windows", json!({ "pid": pid }))?;
-    let title = windows["windows"]
-        .as_array()
-        .and_then(|w| w.iter().find(|w| w["window_id"] == window_id))
-        .and_then(|w| w["title"].as_str())
-        .context("no such window for that pid")?
-        .to_string();
-    CdpPage::connect(port, &title).map(Some)
 }

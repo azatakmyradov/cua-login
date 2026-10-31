@@ -1,10 +1,10 @@
 //! Typing a login into a Chrome tab, after checking the tab's site against
 //! the URLs saved on the item.
 
-use crate::driver::{refusal, Driver};
+use crate::driver::Driver;
 use crate::vault::Login;
 use anyhow::{bail, Context, Result};
-use serde_json::{json, Value};
+use serde_json::json;
 use std::collections::HashMap;
 use url::Url;
 
@@ -34,12 +34,6 @@ impl Field {
     }
 }
 
-#[derive(Clone)]
-pub struct Tab {
-    pub target_id: String,
-    pub tab_id: String,
-}
-
 pub struct Filled {
     pub host: String,
     pub fields: Vec<Field>,
@@ -59,66 +53,12 @@ pub trait Page {
     fn type_text(&mut self, reference: &str, text: &str) -> Result<()>;
 }
 
-/// A tab bound through cua-driver's own session.
-pub struct DriverPage<'a> {
-    pub driver: &'a mut Driver,
-    pub tab: Tab,
-    snapshot: Option<Value>,
-}
-
-impl<'a> DriverPage<'a> {
-    pub fn new(driver: &'a mut Driver, tab: Tab) -> Self {
-        DriverPage { driver, tab, snapshot: None }
-    }
-
-    fn snapshot(&mut self) -> Result<&Value> {
-        if self.snapshot.is_none() {
-            let snapshot = self.driver.call(
-                "get_browser_state",
-                json!({ "target_id": self.tab.target_id, "tab_id": self.tab.tab_id }),
-            )?;
-            if let Some(code) = refusal(&snapshot) {
-                bail!("cannot read the tab: {code}");
-            }
-            self.snapshot = Some(snapshot);
-        }
-        Ok(self.snapshot.as_ref().unwrap())
-    }
-}
-
-impl Page for DriverPage<'_> {
-    fn url(&mut self) -> Result<String> {
-        Ok(self.snapshot()?["url"].as_str().unwrap_or_default().to_string())
-    }
-
-    fn inputs(&mut self) -> Result<Vec<Input>> {
-        Ok(inputs(self.snapshot()?))
-    }
-
-    fn type_text(&mut self, reference: &str, text: &str) -> Result<()> {
-        let result = self.driver.call(
-            "browser_type",
-            json!({
-                "target_id": self.tab.target_id,
-                "tab_id": self.tab.tab_id,
-                "ref": reference,
-                "text": text,
-                "replace": true,
-            }),
-        )?;
-        if let Some(code) = refusal(&result) {
-            bail!("typing failed: {code}");
-        }
-        Ok(())
-    }
-}
-
 impl Input {
     fn attr(&self, key: &str) -> &str {
         self.attrs.get(key).map(String::as_str).unwrap_or("")
     }
 
-    fn kind(&self) -> &str {
+    pub fn kind(&self) -> &str {
         match self.attr("type") {
             "" => "text",
             t => t,
@@ -131,23 +71,6 @@ impl Input {
             words.iter().any(|w| v.contains(w))
         })
     }
-}
-
-/// Binds the active tab of a Chrome window through cua-driver. The inner
-/// Err holds cua-driver's refusal code when this session has no route to it.
-pub fn bind(driver: &mut Driver, pid: i64, window_id: i64) -> Result<Result<Tab, String>> {
-    let state = driver.call("get_browser_state", json!({ "pid": pid, "window_id": window_id }))?;
-    if let Some(code) = refusal(&state) {
-        return Ok(Err(code.to_string()));
-    }
-    let tab = state["tabs"]
-        .as_array()
-        .and_then(|t| t.iter().find(|t| t["active"] == true))
-        .context("the window has no active tab")?;
-    Ok(Ok(Tab {
-        target_id: state["target_id"].as_str().unwrap_or_default().into(),
-        tab_id: tab["tab_id"].as_str().unwrap_or_default().into(),
-    }))
 }
 
 /// Refuses while cua-driver is recording, so values never land in a video.
@@ -242,28 +165,6 @@ fn parse_saved(uri: &str) -> Option<Url> {
         .or_else(|| Url::parse(&format!("https://{uri}")).ok())
 }
 
-/// Inputs in the main frame, from a dom_refs_v1 snapshot. Labels look like
-/// `name=username id=username type=text`.
-fn inputs(snapshot: &Value) -> Vec<Input> {
-    let refs = snapshot["refs"].as_array().cloned().unwrap_or_default();
-    refs.iter()
-        .enumerate()
-        .filter(|(_, r)| r["node"] == "input" && r["frame"] == "main")
-        .map(|(index, r)| Input {
-            index,
-            reference: r["ref"].as_str().unwrap_or_default().into(),
-            attrs: r["label"]
-                .as_str()
-                .unwrap_or_default()
-                .split_whitespace()
-                .filter_map(|kv| kv.split_once('='))
-                .map(|(k, v)| (k.to_string(), v.to_string()))
-                .collect(),
-        })
-        .filter(|i| !matches!(i.kind(), "hidden" | "submit" | "button" | "checkbox" | "radio"))
-        .collect()
-}
-
 fn find_username<'a>(inputs: &'a [Input], password: Option<&Input>) -> Option<&'a Input> {
     let textual = |i: &&Input| matches!(i.kind(), "text" | "email" | "tel");
     inputs
@@ -316,7 +217,7 @@ mod tests {
             { "frame": "main", "node": "input", "ref": "p1:4", "label": "name=password type=password" },
             { "frame": "ad", "node": "input", "ref": "p1:5", "label": "type=password" },
         ]});
-        let inputs = inputs(&snapshot);
+        let inputs = crate::browser::inputs(&snapshot);
         let password = inputs.iter().find(|i| i.kind() == "password");
         assert_eq!(password.unwrap().reference, "p1:4");
         assert_eq!(find_username(&inputs, password).unwrap().reference, "p1:3");

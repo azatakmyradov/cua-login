@@ -72,6 +72,15 @@ impl Driver {
         Ok(serde_json::from_str(text).unwrap_or_else(|_| json!({ "text": text })))
     }
 
+    pub fn window(&mut self, pid: i64, window_id: i64) -> Result<Value> {
+        let windows = self.call("list_windows", json!({ "pid": pid }))?;
+        windows["windows"]
+            .as_array()
+            .and_then(|w| w.iter().find(|w| w["window_id"] == window_id))
+            .cloned()
+            .context("no such window for that pid")
+    }
+
     fn notify(&mut self, method: &str) -> Result<()> {
         self.send(&json!({ "jsonrpc": "2.0", "method": method }))
     }
